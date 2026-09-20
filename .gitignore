@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.agent-state.json
+.claude/
+# stray logs anywhere, but keep the per-report run logs that ship with the archived reports
+*.log
+!reports/*.log

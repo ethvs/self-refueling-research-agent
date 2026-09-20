@@ -1,0 +1,38 @@
+{
+  "name": "self-refueling-research-agent",
+  "version": "0.1.0",
+  "description": "Autonomous research agent that monitors and refuels its own Orbio CREDIT balance",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "orbio-research": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "demo": "tsx src/index.ts --mock --no-chat \"Robinhood Chain 上的 AI 推理积分市场现状\"",
+    "demo:team": "tsx src/index.ts --mock --no-chat team \"Robinhood Chain 上的 AI 推理积分市场现状\"",
+    "web": "tsx src/index.ts web",
+    "web:mock": "tsx src/index.ts --mock web",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsx --test tests/credit-manager.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "openai": "^4.67.0",
+    "viem": "^2.21.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}

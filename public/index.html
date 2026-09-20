@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Self-Refueling Research Agent · Orbio</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e8ee; --muted: #8b93a7;
+    --accent: #c6ff4d; --accent-ink: #12210a; --warn: #ffb347; --err: #ff6b6b; --ok: #6ee7a8;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  header .mode { font-family: var(--mono); font-size: 11px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
+  header .mode.live { color: var(--warn); border-color: var(--warn); }
+  header .stats { margin-left: auto; display: flex; gap: 18px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  header .stats b { color: var(--text); font-weight: 600; }
+  main { display: grid; grid-template-columns: 300px 1fr; height: calc(100vh - 53px); }
+  aside { border-right: 1px solid var(--line); overflow: auto; display: flex; flex-direction: column; }
+  section { padding: 16px 22px; overflow: auto; display: grid; grid-template-rows: auto 1fr; gap: 14px; }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  form.run { display: grid; grid-template-columns: 1fr 90px 130px 110px; gap: 8px; }
+  input, button, select { font: inherit; color: var(--text); background: #0c0e12; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; }
+  input:focus { outline: none; border-color: var(--accent); }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+  .tabs button { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); padding: 8px 12px; }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .pane { display: none; overflow: auto; height: 100%; }
+  .pane.active { display: block; }
+  #log { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; line-height: 1.55; }
+  #log .warn { color: var(--warn); } #log .error { color: var(--err); } #log .credit { color: var(--ok); } #log .ts { color: var(--muted); }
+  .list { list-style: none; margin: 0; padding: 0; }
+  .list li { padding: 10px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .list li:hover, .list li.active { background: var(--panel); }
+  .list .topic { font-weight: 600; }
+  .list .meta { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .list li label { float: right; color: var(--muted); font-size: 11px; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 14px 16px 6px; }
+  .md { max-width: 900px; }
+  .md h1 { font-size: 22px; } .md h2 { font-size: 17px; border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-top: 26px; }
+  .md table { border-collapse: collapse; } .md td, .md th { border: 1px solid var(--line); padding: 4px 10px; }
+  .md code { font-family: var(--mono); font-size: 12px; background: #0c0e12; padding: 1px 5px; border-radius: 4px; }
+  .md details { border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; margin: 8px 0; }
+  .md a { color: var(--accent); }
+  .ask { display: grid; grid-template-columns: 1fr 100px; gap: 8px; margin-top: 12px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; color: var(--muted); font-size: 12px; }
+  .toolbar a { color: var(--accent); }
+  .empty { color: var(--muted); padding: 30px; text-align: center; }
+  .badge { display: inline-block; font-family: var(--mono); font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--warn); color: var(--warn); vertical-align: 1px; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Self-Refueling Research Agent</h1>
+  <span class="mode" id="mode">…</span>
+  <div class="stats">
+    <span>API 余额 <b id="apiBal">–</b></span>
+    <span>USDG <b id="usdg">–</b></span>
+    <span>阈值 <b id="thr">–</b></span>
+    <span>续费 <b id="refuels">–</b></span>
+    <span title="链上 USDG：本任务已花 / 上限 · 今日已花 / 上限 · 网关 API 每任务上限">预算 <b id="budget">–</b></span>
+  </div>
+</header>
+<main>
+  <aside>
+    <h2>历史报告</h2>
+    <ul class="list" id="reports"></ul>
+    <div class="box" style="margin: 12px 16px;">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">勾选两份报告后对比</div>
+      <button id="btnCompare" disabled style="width:100%">对比所选报告</button>
+    </div>
+  </aside>
+  <section>
+    <div class="box">
+      <form class="run" id="runForm">
+        <input id="topic" placeholder="输入研究主题，例如：Robinhood Chain 上的 AI 推理积分市场现状" required />
+        <input id="steps" type="number" min="1" max="8" value="3" title="步骤数" />
+        <select id="workers" title="模式">
+          <option value="1">单 Agent</option>
+          <option value="2">团队 · 2 Agent</option>
+          <option value="3">团队 · 3 Agent</option>
+          <option value="4">团队 · 4 Agent</option>
+        </select>
+        <button class="primary" id="btnRun" type="submit">开始研究</button>
+      </form>
+    </div>
+    <div class="box" style="display:grid;grid-template-rows:auto 1fr;min-height:0">
+      <div class="tabs">
+        <button data-tab="log" class="active">实时日志</button>
+        <button data-tab="report">报告</button>
+        <button data-tab="compare">对比结果</button>
+      </div>
+      <div class="pane active" id="pane-log"><div id="log"></div></div>
+      <div class="pane" id="pane-report">
+        <div class="toolbar" id="reportBar"></div>
+        <div class="md" id="report"><div class="empty">左侧选择一份报告</div></div>
+        <form class="ask" id="askForm" style="display:none">
+          <input id="question" placeholder="对这份报告追问…" required />
+          <button class="primary" id="btnAsk" type="submit">追问</button>
+        </form>
+      </div>
+      <div class="pane" id="pane-compare"><div class="md" id="compare"><div class="empty">勾选两份报告后点击“对比所选报告”</div></div></div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { current: null, selected: new Set(), running: false };
+
+// ---- tabs ----
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
+function showTab(name) {
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.id === "pane-" + name));
+}
+
+// ---- status ----
+async function refreshStatus() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    $("#mode").textContent = s.mode; $("#mode").classList.toggle("live", s.mode === "LIVE");
+    $("#apiBal").textContent = "$" + s.apiBalance.toFixed(4);
+    $("#usdg").textContent = s.wallet ? s.wallet.usdg.toFixed(2) : "–";
+    $("#thr").textContent = "$" + s.threshold;
+    $("#refuels").textContent = s.refuels.length;
+    if (s.budget) {
+      const b = s.budget;
+      $("#budget").textContent = `${b.taskSpent.toFixed(2)}/${b.taskCap} · 今日 ${b.daySpent.toFixed(2)}/${b.dayCap} USDG · API $${b.apiCapPerTask}/任务`;
+    }
+    state.running = s.busy; $("#btnRun").disabled = s.busy;
+    $("#btnRun").innerHTML = s.busy ? '<span class="spinner"></span> 研究中' : "开始研究";
+  } catch {}
+}
+
+// ---- logs (SSE) ----
+const logEl = $("#log");
+const es = new EventSource("/api/logs");
+es.onmessage = (ev) => {
+  const e = JSON.parse(ev.data);
+  const div = document.createElement("div");
+  div.className = e.level + (e.scope === "credit" || e.scope === "budget" || e.scope === "team" ? " credit" : "");
+  div.innerHTML = `<span class="ts">${e.ts.slice(11, 19)}</span> [${e.scope}] ${escapeHtml(e.msg)}`;
+  logEl.appendChild(div);
+  while (logEl.childElementCount > 400) logEl.firstChild.remove();
+  $("#pane-log").scrollTop = $("#pane-log").scrollHeight;
+  if (/Report saved|research failed|Refuel|refuel|balance/i.test(e.msg)) { refreshStatus(); }
+  if (/report saved/i.test(e.msg)) { loadReports().then(() => { const first = document.querySelector("#reports li"); if (first) first.click(); }); }
+};
+
+// ---- reports ----
+async function loadReports() {
+  const rows = await (await fetch("/api/reports")).json();
+  const ul = $("#reports"); ul.innerHTML = "";
+  if (!rows.length) ul.innerHTML = '<li class="empty">还没有报告</li>';
+  for (const r of rows) {
+    const li = document.createElement("li");
+    li.dataset.id = r.id;
+    li.classList.toggle("active", r.id === state.current);
+    li.innerHTML = `<label><input type="checkbox" ${state.selected.has(r.id) ? "checked" : ""}></label>
+      <div class="topic">${r.status === "partial" ? '<span class="badge">未完成</span> ' : ""}${escapeHtml(r.topic)}</div>
+      <div class="meta">${r.createdAt.slice(0, 16).replace("T", " ")} · ${r.cost ? "$" + r.cost.consumed.toFixed(4) : "–"} · 追问 ${r.followups}</div>`;
+    li.querySelector("input").onclick = (ev) => {
+      ev.stopPropagation();
+      ev.target.checked ? state.selected.add(r.id) : state.selected.delete(r.id);
+      $("#btnCompare").disabled = state.selected.size !== 2;
+    };
+    li.onclick = () => openReport(r.id);
+    ul.appendChild(li);
+  }
+}
+
+async function openReport(id) {
+  state.current = id;
+  document.querySelectorAll("#reports li").forEach((li) => li.classList.toggle("active", li.dataset.id === id));
+  const rec = await (await fetch("/api/reports/" + encodeURIComponent(id))).json();
+  $("#report").innerHTML = marked.parse(rec.markdown || rec.synthesis || "");
+  const logLink = rec.logFile ? ` · <a href="/api/reports/${encodeURIComponent(id)}.log" target="_blank">查看日志</a>` : "";
+  const status = rec.status === "partial" ? ` · <span class="badge">未完成</span>` : "";
+  $("#reportBar").innerHTML = `<span>${escapeHtml(rec.id)}</span>${status} · <a href="/api/reports/${encodeURIComponent(id)}.md">下载 Markdown</a>${logLink}`;
+  $("#askForm").style.display = "grid";
+  showTab("report");
+}
+
+// ---- run ----
+$("#runForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const topic = $("#topic").value.trim(); if (!topic) return;
+  const workers = Number($("#workers").value);
+  const res = await fetch("/api/research", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ topic, steps: Number($("#steps").value), workers }) });
+  if (!res.ok) { alert((await res.json()).error); return; }
+  showTab("log"); refreshStatus();
+};
+
+$("#workers").onchange = () => { const team = Number($("#workers").value) > 1; $("#steps").value = team ? 2 : 3; $("#steps").title = team ? "每个 Agent 的步骤数" : "步骤数"; };
+
+// ---- ask ----
+$("#askForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const q = $("#question").value.trim(); if (!q || !state.current) return;
+  $("#btnAsk").disabled = true; $("#btnAsk").innerHTML = '<span class="spinner"></span>';
+  try {
+    const res = await fetch(`/api/reports/${encodeURIComponent(state.current)}/ask`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: q }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    $("#question").value = "";
+    await openReport(state.current);
+    $("#pane-report").scrollTop = $("#pane-report").scrollHeight;
+    loadReports(); refreshStatus();
+  } catch (e) { alert(e.message); }
+  finally { $("#btnAsk").disabled = false; $("#btnAsk").textContent = "追问"; }
+};
+
+// ---- compare ----
+$("#btnCompare").onclick = async () => {
+  const [a, b] = [...state.selected];
+  $("#btnCompare").disabled = true; $("#btnCompare").innerHTML = '<span class="spinner"></span> 对比中';
+  showTab("compare"); $("#compare").innerHTML = '<div class="empty">正在对比…</div>';
+  try {
+    const res = await fetch("/api/compare", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ a, b }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    $("#compare").innerHTML = marked.parse(data.markdown);
+    refreshStatus();
+  } catch (e) { $("#compare").innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`; }
+  finally { $("#btnCompare").textContent = "对比所选报告"; $("#btnCompare").disabled = state.selected.size !== 2; }
+};
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+refreshStatus(); loadReports(); setInterval(refreshStatus, 15000);
+</script>
+</body>
+</html>
