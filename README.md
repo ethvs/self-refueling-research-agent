@@ -5,6 +5,8 @@
 
 为 [Orbio](https://www.orbio.so) 生态构建比赛而作。运行在 Robinhood Chain（chain id 4663）。
 
+> **English summary.** An autonomous research agent built for the [Orbio](https://www.orbio.so) ecosystem on Robinhood Chain. Give it a topic and it plans, researches with real citations and writes a Markdown report through the Orbio gateway, while watching its own API balance; when the balance runs low it buys CREDIT from the on-chain Exchange order book with `buyAndActivate` and keeps working, with no human in the loop. It ships with budget caps, partial-result reports and per-run logs, a Web UI, report history / compare / follow-up, and a team mode where a coordinator funds gas-less worker agents on-chain. Every feature was verified on Robinhood Chain mainnet (transaction hashes in 主网验证记录 below). Competition one-pager in English and Chinese: **[SUBMISSION.md](SUBMISSION.md)**; screenshots in [`docs/screenshots/`](docs/screenshots/).
+
 ## 工作流程
 
 ```
@@ -57,6 +59,8 @@ src/
 └── abi/orbio.ts        合约地址 + Exchange / CREDIT ABI
 public/index.html       Web 界面（单页）
 tests/                  纯逻辑单元测试
+docs/screenshots/       主网验证截图（索引见 SUBMISSION.md）
+SUBMISSION.md           参赛提交说明（中英双语）
 ```
 
 ## 快速开始
