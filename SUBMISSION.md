@@ -32,6 +32,7 @@
 - **Error handling that was earned on mainnet**: gas and token pre-flight before any transaction, the Exchange's custom `InsufficientFunds()` revert decoded, deterministic chain errors never retried, planner JSON retried once, team synthesis falls back to concatenated sub-reports.
 - **Team mode**: worker wallets are derived from the master key (`keccak256(key ‖ index)`), never stored, and hold **no gas and no USDG**. A worker below its threshold asks the coordinator, which funds it with `buyAndActivate(..., beneficiary = worker)` under the coordinator's discount rule and budget guard, serialized so parallel workers never race the coordinator's nonce. One failing worker does not stop the others.
 - **Tests**: 11 unit tests over the pure logic (key derivation, discount rule, budget guard, config warnings, 402 detection and refuel, partial reports, planner retry).
+- **Reusable credit layer**: seven files with no dependency on the research code; the README section *How to add self-refueling to your own agent* shows the whole integration in about twenty lines.
 
 ## Mainnet evidence
 
@@ -150,6 +151,7 @@ All CLI screenshots are from the author's PowerShell terminal; the first log lin
 - **在主网上踩出来的错误处理**：发交易前预检 gas 和代币余额，解码 Exchange 的 `InsufficientFunds()` 自定义错误，确定性链上错误不重试，规划 JSON 不合法重试一次，团队汇总失败降级为拼接子报告。
 - **团队模式**：工作钱包由主私钥派生（`keccak256(主私钥 ‖ 序号)`），不落盘，**不持有 gas 和 USDG**。工作 Agent 余额低于阈值时向协调者申请，协调者按自己的折扣策略和预算守卫用 `buyAndActivate(..., beneficiary = worker)` 拨款，拨款串行执行避免 nonce 冲突。单个 Agent 失败不影响其他 Agent。
 - **测试**：11 个纯逻辑单元测试（Key 派生、折扣规则、预算守卫、配置检查、402 识别与续费、部分报告、规划重试）。
+- **可复用的额度层**：七个文件，不依赖研究逻辑；README 的「How to add self-refueling to your own agent」一节用二十来行代码展示完整接入。
 
 ## 主网验证记录
 

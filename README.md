@@ -164,6 +164,64 @@ npm run dev -- team transfer 1 0.5 --live           # credit.transfer 0.5 未激
 - 钱包首次激活前网关返回 401，按余额 $0 处理并继续购买流程。
 - `DRY_RUN=true`（默认）只报价，不发交易；CLI 出错只打印一行原因，`LOG_LEVEL=debug` 才打印堆栈。
 
+## How to add self-refueling to your own agent（在你自己的 Agent 里复用）
+
+The credit layer does not depend on the research code. Copy these seven files into your project (dependencies: `viem`, `zod`, `dotenv`):
+
+```
+src/credit-manager.ts   balance, quote, discount rule, approve + buyAndActivate, activate, pre-flight checks
+src/wallet.ts           signature-derived Orbio API key (in memory only), key rotation
+src/budget.ts           per-task / per-day USDG caps
+src/config.ts           .env schema (PRIVATE_KEY, thresholds, budgets, contract addresses)
+src/retry.ts  src/logger.ts  src/abi/orbio.ts
+```
+
+Then wrap any agent loop that calls the Orbio gateway:
+
+```ts
+import OpenAI from "openai";
+import { loadConfig } from "./config.js";
+import { WalletManager } from "./wallet.js";
+import { BudgetGuard } from "./budget.js";
+import { CreditManager } from "./credit-manager.js";
+import { isInsufficientBalance } from "./llm.js"; // or check err.status === 402 yourself
+
+const cfg = loadConfig();                                   // reads .env
+const wallet = new WalletManager(cfg);
+await wallet.ensureApiKey();                                // sk-orb-<epoch>-<base64(sig)>, never written to disk
+const budget = new BudgetGuard(cfg.MAX_SPEND_PER_TASK, cfg.MAX_SPEND_PER_DAY);
+const credit = new CreditManager(cfg, wallet, budget);
+const openai = new OpenAI({ apiKey: wallet.getApiKey(), baseURL: cfg.ORBIO_API_BASE });
+
+for (const step of steps) {
+  // Checkpoint: GET /key → below CREDIT_LOW_THRESHOLD? → getQuote → discount ≥ MIN_DISCOUNT?
+  // → budget ok? → approve + buyAndActivate(REFUEL_USDG) → wait for the balance to land.
+  try {
+    await credit.ensureFuel();
+  } catch (err) {
+    console.warn("refuel refused, continuing with the remaining balance:", err);   // discount too low or cap hit
+  }
+
+  try {
+    await openai.chat.completions.create({ model: "openai/gpt-4o-mini", messages: step });
+  } catch (err) {
+    if (!isInsufficientBalance(err)) throw err;             // gateway said 402 between two checkpoints
+    await credit.refuelNow();
+    await openai.chat.completions.create({ model: "openai/gpt-4o-mini", messages: step });
+  }
+}
+```
+
+To fund another agent instead of yourself (a derived wallet that holds no gas and no USDG), activate straight into its API balance:
+
+```ts
+await credit.purchase(0.1, workerAddress, () => CreditManager.balanceForKey(cfg.ORBIO_API_BASE, workerApiKey));
+```
+
+What the module already handles for you: the `401` a fresh key gets before its first activation (treated as `$0`), the Exchange's `InsufficientFunds()` revert, gas and token pre-flight, exact-amount approvals, `minCreditOut` at 99% of the quote, and no retries on deterministic chain errors. `DRY_RUN=true` lets you exercise the whole path without sending a transaction.
+
+以上七个文件与研究逻辑无关，可直接拷进任何调用 Orbio 网关的 Agent：每步前 `ensureFuel()`，中途 402 时 `refuelNow()`，给派生钱包拨款用 `purchase(usdgIn, beneficiary, readBalance)`。
+
 ## 主网验证记录
 
 2026-09-19 起在 Robinhood Chain 主网用 1 USDG 完整跑通自动续费链路，之后每个功能都在主网真实验证：
