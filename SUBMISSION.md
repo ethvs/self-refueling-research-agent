@@ -8,7 +8,7 @@
 | **Chain** | Robinhood Chain mainnet (chain id 4663) |
 | **Agent wallet** | `0x7e0831BC91aabDce79dfdd8d2d548dA37561c1FD` |
 | **Stack** | TypeScript · Node 20+ · viem · OpenAI SDK pointed at the Orbio gateway · Express · zod |
-| **Built** | 2026-09-19 → 2026-09-20, every feature verified on mainnet as it was added |
+| **Built** | 2026-09-19 → 2026-09-22; the credit loop was verified on mainnet as it was built, the market-maker and Uniswap layers in the offline demo |
 | **Screenshots** | [`docs/screenshots/`](docs/screenshots/) — index at the end of this file |
 
 ## The idea in one paragraph
@@ -21,6 +21,8 @@
 - **Inference** via `https://api.orbio.so/api/v1` with the plain OpenAI SDK. Three-tier routing: plan with `openai/gpt-4o-mini`, research with `perplexity/sonar` (web search + citations), synthesize with `anthropic/claude-sonnet-4.5`; automatic fallback when a model has no provider.
 - **Balance** via `GET /api/v1/key` (`balance.available`).
 - **Refuel path**: `exchange.getQuote(usdgIn, maxFills)` → discount check (`price = (usdgSpent + fee) / creditOut`, buy only if `1 − price ≥ MIN_DISCOUNT`) → budget guard → gas and USDG pre-flight → `approve` (exact amount) → `buyAndActivate(usdgIn, minCreditOut, bytes32(beneficiary), maxFills)` → wait until the gateway balance reflects the activation.
+- **Second venue**: when `UNISWAP_PATH` is configured the same refuel also quotes the Uniswap v4 route (`USDG → NVDA → ORBIO → CREDIT`) through the v4 Quoter and takes whichever venue returns more CREDIT; the Uniswap leg is Permit2 → Universal Router `execute(V4_SWAP)` → `credit.activate`.
+- **Sell side**: surplus unactivated CREDIT is listed on the Exchange with `sell(creditAtoms, price)` (interface recovered from the mainnet implementation contract and verified with `eth_call`: 5 CREDIT minimum, 0.025 price tick, `orderOf` / `cancel` / `bestPrice` / `depth`). Fills pay USDG straight back to the wallet for the next refuel.
 - **Held CREDIT**: `credit.previewActivation` + `credit.activate(amount)` when the wallet already holds unactivated CREDIT.
 - **Mid-run 402** ("insufficient balance") from the gateway → refuel immediately and retry the call once, instead of waiting for the next checkpoint.
 
@@ -31,7 +33,9 @@
 - **Three budget layers**: on-chain USDG caps per task and per day (persisted), a gateway-spend cap per run, and a minimum discount. Start-up prints warnings when the caps contradict each other.
 - **Error handling that was earned on mainnet**: gas and token pre-flight before any transaction, the Exchange's custom `InsufficientFunds()` revert decoded, deterministic chain errors never retried, planner JSON retried once, team synthesis falls back to concatenated sub-reports.
 - **Team mode**: worker wallets are derived from the master key (`keccak256(key ‖ index)`), never stored, and hold **no gas and no USDG**. A worker below its threshold asks the coordinator, which funds it with `buyAndActivate(..., beneficiary = worker)` under the coordinator's discount rule and budget guard, serialized so parallel workers never race the coordinator's nonce. One failing worker does not stop the others.
-- **Tests**: 11 unit tests over the pure logic (key derivation, discount rule, budget guard, config warnings, 402 detection and refuel, partial reports, planner retry).
+- **Market maker ("earn credits to feed yourself")**: with `MARKET_MAKER=true` every run ends with a maintenance round: settle filled asks → restock a batch of CREDIT when the book discount is deep enough → list the surplus above `CREDIT_RESERVE` at `max(best ask, SELL_MIN_PRICE)`. One batch at a time, under the same budget guard; whether asks fill depends on other buyers, nothing promises a profit. CLI: `book`, `buy`, `sell`, `orders`, `cancel`, `market`.
+- **Uniswap fallback**: a second buy venue next to the order book, chosen per refuel by comparing quotes. No CREDIT/ORBIO pool exists on chain yet, so `.env.example` leaves the path empty; once a pool is live, fee / tickSpacing / hooks and the Quoter address switch it on without code changes. CLI: `route`.
+- **Tests**: 17 unit tests over the pure logic (key derivation, discount rule, venue selection, budget guard, config warnings, ask pricing, market-maker listing and restock rules, Uniswap path parsing and swap encoding, 402 detection and refuel, partial reports, planner retry).
 - **Reusable credit layer**: seven files with no dependency on the research code; the README section *How to add self-refueling to your own agent* shows the whole integration in about twenty lines.
 
 ## Mainnet evidence
@@ -72,6 +76,10 @@ npm run demo        # plan → steps → balance drops → quote → buyAndActiv
 npm run demo:team   # coordinator funds 3 workers, parallel research, merged team report
 npm run web:mock    # the same in the browser at http://localhost:3000
 npm test
+# market maker: restock → list → a buyer fills → USDG back → restock again → budget guard stops the third batch
+MARKET_MAKER=true INVENTORY_USDG=5 INVENTORY_DISCOUNT=0.15 SELL_MIN_PRICE=0.9 MAX_SPEND_PER_TASK=10 MAX_SPEND_PER_DAY=20 npm run dev -- --mock market --rounds 3
+# Uniswap venue: both quotes, the cheaper pool route wins, Permit2 → Universal Router → activate
+UNISWAP_PATH=mock MIN_DISCOUNT=0.2 npm run demo
 ```
 
 Real mode: copy `.env.example` to `.env`, set `PRIVATE_KEY` (the wallet needs a little ETH for gas and some USDG). `DRY_RUN=true` (default) quotes but never sends a transaction; add `--live` to transact.
@@ -90,9 +98,9 @@ npm run web
 - **Mock** (`--mock`, the `demo*` scripts): in-memory balance, a fixed 18%-discount order book, canned model output. Easy to spot: the first log line says `(MOCK)`, transaction hashes start with `0xmock`, sources read "示例机构报告 2026".
 - **DRY RUN** (default in real mode): real gateway and real quotes, but no transaction is sent; in team mode the workers share the coordinator's key. The first log line says `(DRY RUN)`; live runs say `(LIVE)`.
 
-## Deliberately out of scope
+## Scope notes
 
-Telegram/Discord bot, automatic `sell` orders for surplus CREDIT, and a Uniswap fallback route were considered and left out. `team transfer` (`credit.transfer` to a worker) is implemented but has not been exercised on mainnet.
+The refuel loop, research features, Web UI and team funding are the mainnet-verified core (evidence table above). The market maker and the Uniswap venue were added on 2026-09-22 and are exercised end to end in the offline demo; the Exchange sell interface they rely on was read back from the mainnet contract with `eth_call`. A Telegram/Discord bot was considered and left out.
 
 ## Safety
 
@@ -127,7 +135,7 @@ All CLI screenshots are from the author's PowerShell terminal; the first log lin
 | **链** | Robinhood Chain 主网（chain id 4663） |
 | **Agent 钱包** | `0x7e0831BC91aabDce79dfdd8d2d548dA37561c1FD` |
 | **技术栈** | TypeScript · Node 20+ · viem · OpenAI SDK（指向 Orbio 网关）· Express · zod |
-| **开发周期** | 2026-09-19 → 2026-09-20，每个功能做完即在主网验证 |
+| **开发周期** | 2026-09-19 → 2026-09-22；额度循环边做边在主网验证，做市与 Uniswap 层在离线演示中完整跑通 |
 | **截图** | [`docs/screenshots/`](docs/screenshots/)，索引见本节末尾 |
 
 ## 一句话
@@ -140,6 +148,8 @@ All CLI screenshots are from the author's PowerShell terminal; the first log lin
 - **推理**：`https://api.orbio.so/api/v1`，OpenAI SDK 直连。三层模型路由：规划 `openai/gpt-4o-mini` → 检索 `perplexity/sonar`（联网 + 引用）→ 总结 `anthropic/claude-sonnet-4.5`，模型无提供方时自动回退。
 - **余额**：`GET /api/v1/key` 的 `balance.available`。
 - **续费链路**：`exchange.getQuote` → 折扣计算（`price = (usdgSpent + fee) / creditOut`，`1 − price ≥ MIN_DISCOUNT` 才买）→ 预算守卫 → gas / USDG 预检 → 精确额度 `approve` → `buyAndActivate(usdgIn, minCreditOut, bytes32(beneficiary), maxFills)` → 等网关余额更新。
+- **第二渠道**：配置 `UNISWAP_PATH` 后，同一次续费还会用 v4 Quoter 给 Uniswap 路径（`USDG → NVDA → ORBIO → CREDIT`）报价，取 CREDIT 更多的一方；Uniswap 这条路是 Permit2 → Universal Router `execute(V4_SWAP)` → `credit.activate`。
+- **卖出侧**：多余的未激活 CREDIT 用 `sell(creditAtoms, price)` 挂到 Exchange（接口从主网实现合约恢复并用 `eth_call` 验证：最小 5 CREDIT、价格刻度 0.025、`orderOf` / `cancel` / `bestPrice` / `depth`），成交的 USDG 直接回到钱包供下次续费。
 - **已持有 CREDIT**：`credit.previewActivation` + `credit.activate(amount)`。
 - **中途 402**：网关在两次检查点之间报余额耗尽时，立即续费并重试一次。
 
@@ -150,7 +160,9 @@ All CLI screenshots are from the author's PowerShell terminal; the first log lin
 - **三层预算**：链上 USDG 单任务 / 每日上限（持久化）、每次运行的网关花费上限、最低折扣；启动时检查配置是否自洽并打印警告。
 - **在主网上踩出来的错误处理**：发交易前预检 gas 和代币余额，解码 Exchange 的 `InsufficientFunds()` 自定义错误，确定性链上错误不重试，规划 JSON 不合法重试一次，团队汇总失败降级为拼接子报告。
 - **团队模式**：工作钱包由主私钥派生（`keccak256(主私钥 ‖ 序号)`），不落盘，**不持有 gas 和 USDG**。工作 Agent 余额低于阈值时向协调者申请，协调者按自己的折扣策略和预算守卫用 `buyAndActivate(..., beneficiary = worker)` 拨款，拨款串行执行避免 nonce 冲突。单个 Agent 失败不影响其他 Agent。
-- **测试**：11 个纯逻辑单元测试（Key 派生、折扣规则、预算守卫、配置检查、402 识别与续费、部分报告、规划重试）。
+- **做市（赚积分养自己）**：`MARKET_MAKER=true` 时每次运行结束做一轮维护：结算已成交卖单 → 订单簿折扣够深就补一批 CREDIT → 把高于 `CREDIT_RESERVE` 的库存按 `max(最低卖价, SELL_MIN_PRICE)` 挂出。一次只补一批，走同一份预算守卫；能否成交取决于其他买家，不承诺盈利。命令：`book`、`buy`、`sell`、`orders`、`cancel`、`market`。
+- **Uniswap 备选**：订单簿之外的第二个买入渠道，每次续费比价择优。链上目前还没有 CREDIT/ORBIO 池，所以 `.env.example` 路径留空；池子上线后填 fee / tickSpacing / hooks 和 Quoter 地址即可启用，代码不用改。命令：`route`。
+- **测试**：17 个纯逻辑单元测试（Key 派生、折扣规则、渠道选择、预算守卫、配置检查、挂单定价、做市挂单与补货规则、Uniswap 路径解析与交易编码、402 识别与续费、部分报告、规划重试）。
 - **可复用的额度层**：七个文件，不依赖研究逻辑；README 的「How to add self-refueling to your own agent」一节用二十来行代码展示完整接入。
 
 ## 主网验证记录
@@ -185,6 +197,10 @@ npm run demo        # 规划 → 执行 → 余额下降 → 报价 → buyAndAc
 npm run demo:team   # 协调者给 3 个工作 Agent 拨款，并行研究，汇总团队报告
 npm run web:mock    # 浏览器里跑同样的流程，http://localhost:3000
 npm test
+# 做市：补货 → 挂单 → 买家成交 → USDG 回款 → 再补货 → 第三批被预算守卫拒绝
+MARKET_MAKER=true INVENTORY_USDG=5 INVENTORY_DISCOUNT=0.15 SELL_MIN_PRICE=0.9 MAX_SPEND_PER_TASK=10 MAX_SPEND_PER_DAY=20 npm run dev -- --mock market --rounds 3
+# Uniswap 渠道：两边报价，池子更便宜则走 Permit2 → Universal Router → activate
+UNISWAP_PATH=mock MIN_DISCOUNT=0.2 npm run demo
 ```
 
 真实模式：复制 `.env.example` 为 `.env`，填写 `PRIVATE_KEY`（钱包需要少量 ETH 作 gas 和一些 USDG）。默认 `DRY_RUN=true` 只报价不发交易，加 `--live` 才真实交易。
@@ -195,9 +211,9 @@ npm test
 - **模拟**（`--mock`，`demo*` 脚本）：内存假余额、固定 18% 折扣的假订单簿、固定模型回复。识别方法：首行日志标 `(MOCK)`，交易哈希以 `0xmock` 开头，来源写「示例机构报告 2026」。
 - **DRY RUN**（真实模式默认）：真实网关、真实报价，但不发交易；团队模式下工作 Agent 共用协调者 Key。首行日志标 `(DRY RUN)`，真实交易运行标 `(LIVE)`。
 
-## 明确不在范围内
+## 范围说明
 
-Telegram / Discord Bot、多余 CREDIT 自动挂单卖出、Uniswap 备选买入路径，经考虑后不做。`team transfer`（`credit.transfer` 给工作 Agent）已实现但未在主网实测。
+续费循环、研究功能、Web 界面和团队拨款是在主网验证过的核心（见上方证据表）。做市和 Uniswap 渠道于 2026-09-22 加入，在离线演示中端到端跑通；它们依赖的 Exchange 卖出接口是用 `eth_call` 从主网合约读回来的。Telegram / Discord Bot 经考虑后不做。
 
 ## 安全
 
