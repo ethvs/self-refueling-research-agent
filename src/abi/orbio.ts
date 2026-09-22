@@ -96,7 +96,90 @@ export const exchangeAbi = [
   { name: "MAX_FILLS", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
   /** Custom error seen on mainnet when the buyer's USDG balance is below usdgIn (selector 0x356680b7). */
   { name: "InsufficientFunds", type: "error", inputs: [] },
+
+  // ---- sell side (not in the published docs; recovered from the mainnet implementation
+  //      0x2d253e15…fbb7 behind the Exchange proxy and verified with eth_call, 2026-09-22) ----
+  /** Place an ask: escrows `creditAtoms` (CREDIT, 6 dp) at `price` (USDG per CREDIT × PRICE_SCALE). */
+  {
+    name: "sell",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { type: "uint256", name: "creditAtoms" },
+      { type: "uint32", name: "price" },
+    ],
+    outputs: [],
+  },
+  /** Cancel an open ask; the unfilled CREDIT returns to the seller. Only the seller may cancel. */
+  { name: "cancel", type: "function", stateMutability: "nonpayable", inputs: [{ type: "uint256", name: "orderId" }], outputs: [] },
+  /** Order state. `remaining` + `filled` = original size; a cancelled order has both at 0. */
+  {
+    name: "orderOf",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ type: "uint256", name: "orderId" }],
+    outputs: [
+      { type: "address", name: "seller" },
+      { type: "uint32", name: "price" },
+      { type: "uint32", name: "seq" },
+      { type: "uint256", name: "remaining" },
+      { type: "uint256", name: "reserved1" },
+      { type: "uint256", name: "filled" },
+      { type: "uint256", name: "reserved2" },
+    ],
+  },
+  /** Lowest ask on the book (× PRICE_SCALE); 0 when empty. */
+  { name: "bestPrice", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint32" }] },
+  /** Total CREDIT on the book, its USDG value at ask prices, and the number of open orders. */
+  {
+    name: "depth",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { type: "uint256", name: "creditAtoms" },
+      { type: "uint256", name: "usdgAtoms" },
+      { type: "uint256", name: "orders" },
+    ],
+  },
+  /** Smallest ask accepted (CREDIT atoms). Mainnet: 5 CREDIT. */
+  { name: "MIN_ORDER", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+  /** Price denominator. Mainnet: 10000, i.e. price 7750 = 0.7750 USDG per CREDIT. */
+  { name: "PRICE_SCALE", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint32" }] },
+  {
+    name: "OrderPlaced",
+    type: "event",
+    inputs: [
+      { type: "uint256", name: "orderId", indexed: true },
+      { type: "address", name: "seller", indexed: true },
+      { type: "uint32", name: "price" },
+      { type: "uint32", name: "seq" },
+      { type: "uint256", name: "creditAtoms" },
+    ],
+  },
+  {
+    name: "OrderCancelled",
+    type: "event",
+    inputs: [
+      { type: "uint256", name: "orderId", indexed: true },
+      { type: "uint256", name: "creditReturned" },
+      { type: "uint256", name: "reserved" },
+    ],
+  },
+  /** Price is not a multiple of the tick (250 on mainnet) or is outside (0, PRICE_SCALE]. */
+  { name: "BadPrice", type: "error", inputs: [{ type: "uint32", name: "price" }] },
+  /** cancel() by anyone but the order's seller. */
+  { name: "NotSeller", type: "error", inputs: [{ type: "uint256", name: "orderId" }] },
+  { name: "NoSuchOrder", type: "error", inputs: [{ type: "uint256", name: "orderId" }] },
 ] as const;
+
+/** Sell-side constants observed on mainnet; also read live via bestPrice / MIN_ORDER / PRICE_SCALE. */
+export const EXCHANGE_SELL = {
+  /** Asks must be placed on this grid (× PRICE_SCALE): 7250, 7500, 7750, … 10000. */
+  PRICE_TICK: 250,
+  /** Selector of the "order below MIN_ORDER" revert (name not recovered); args (creditAtoms, minOrder). */
+  ORDER_TOO_SMALL_SELECTOR: "0x806adb18",
+} as const;
 
 /** CREDIT token: ERC-20 subset + activate / previewActivation */
 export const creditAbi = [

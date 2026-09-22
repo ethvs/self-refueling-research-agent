@@ -1,5 +1,5 @@
 import type { Config } from "./config.js";
-import { CreditManager, type KeyInfo, type Quote, type RefuelRecord } from "./credit-manager.js";
+import { CreditManager, type BookState, type KeyInfo, type OrderState, type Quote, type RefuelRecord, type RouteQuote, type SellRecord, type SwapRoute } from "./credit-manager.js";
 import { OrbioLLM } from "./llm.js";
 import { createLogger } from "./logger.js";
 import type { BudgetGuard } from "./budget.js";
@@ -18,11 +18,45 @@ const log = createLogger("mock");
 export const MOCK_COST_PER_CALL = 0.015; // USD per cheap call (≈ real gpt-4o-mini/sonar cost); strong calls cost double
 export const MOCK_PRICE = 0.82; // USDG per CREDIT (18% discount)
 export const MOCK_FEE_BPS = 0;
+/** Sell side of the mock book mirrors the mainnet constants (min order 5 CREDIT, tick 250, scale 10000). */
+export const MOCK_BOOK = { bestPriceRaw: 7250, minOrder: 5, priceScale: 10_000, priceTick: 250, feeBps: 200 } as const;
+/** Mock Uniswap pool price: a little better than the book so the demo shows the route being picked. */
+export const MOCK_UNISWAP_PRICE = 0.79;
+
+/** Offline stand-in for the Uniswap route (enabled in mock mode when UNISWAP_PATH is set to anything). */
+export class MockSwapRoute implements SwapRoute {
+  readonly name = "uniswap";
+  swaps = 0;
+
+  describe(): string {
+    return "USDG → NVDA (fee 3000) → ORBIO (fee 3000) → CREDIT (fee 500) [mock pools]";
+  }
+
+  async quote(usdgIn: number): Promise<RouteQuote> {
+    await sleep(150);
+    const creditOut = usdgIn / MOCK_UNISWAP_PRICE;
+    return { source: "uniswap", usdgIn, creditOut, price: MOCK_UNISWAP_PRICE, discount: 1 - MOCK_UNISWAP_PRICE, gasEstimate: 285_000 };
+  }
+
+  async swap(usdgIn: number, minCreditOut: number): Promise<{ hash: `0x${string}`; creditOut: number }> {
+    log.info(`[mock] approve(USDG → Permit2, ${usdgIn}) · Permit2.approve(USDG → Universal Router)`);
+    await sleep(300);
+    log.info(`[mock] UniversalRouter.execute(V4_SWAP: ${usdgIn} USDG → ≥ ${minCreditOut.toFixed(4)} CREDIT via ${this.describe()})`);
+    await sleep(500);
+    this.swaps++;
+    return { hash: `0xmockswap${this.swaps.toString(16).padStart(56, "0")}`, creditOut: usdgIn / MOCK_UNISWAP_PRICE };
+  }
+}
 
 export class MockCreditManager extends CreditManager {
   /** Starts just above the threshold so a 3-step run triggers exactly one refuel before step 3. */
   readonly startBalance: number;
   balance: number;
+  /** Wallet-side mock state: USDG and unactivated CREDIT held, and asks on the mock book. */
+  usdg = 25;
+  heldCredit = 0;
+  private orders = new Map<string, OrderState & { placedAtCheck: number }>();
+  private checks = 0;
   private txCounter = 0;
 
   constructor(
@@ -54,7 +88,7 @@ export class MockCreditManager extends CreditManager {
   }
 
   override async walletBalances() {
-    return { usdg: 25, credit: 0, eth: 0.01 };
+    return { usdg: this.usdg, credit: this.heldCredit, eth: 0.01 };
   }
 
   override async quote(usdgIn: number, maxFills = this.mockCfg.MAX_FILLS): Promise<Quote> {
@@ -88,34 +122,45 @@ export class MockCreditManager extends CreditManager {
     log.info(
       `[mock] Quote: ${usdgIn} USDG → ${q.creditOut.toFixed(4)} CREDIT via ${q.fills} fill(s), price ${q.price.toFixed(4)} (${(q.discount * 100).toFixed(1)}% off)${forSelf ? "" : ` for ${beneficiary}`}`,
     );
-    if (!CreditManager.acceptable(q, this.mockCfg.MIN_DISCOUNT)) {
-      throw new Error(`[mock] discount ${(q.discount * 100).toFixed(1)}% below policy`);
+    const alt = await this.routeQuote(usdgIn);
+    const source = CreditManager.pickSource(q, alt, this.mockCfg.MIN_DISCOUNT);
+    if (!source) {
+      throw new Error(`[mock] discount ${(q.discount * 100).toFixed(1)}% below policy${alt ? ` (uniswap ${(alt.discount * 100).toFixed(1)}% too)` : ""}`);
     }
-    const cost = q.usdgSpent + q.feeAtoms;
+    const chosen = source === "uniswap" && alt ? alt : q;
+    const cost = source === "uniswap" ? usdgIn : q.usdgSpent + q.feeAtoms;
     this.budgetGuard.assertCanSpend(cost);
 
-    log.info(`[mock] approve(USDG → Exchange, ${cost.toFixed(4)})`);
-    await sleep(300);
-    log.info(`[mock] buyAndActivate(usdgIn=${usdgIn}, minCreditOut=${(q.creditOut * 0.99).toFixed(4)}, beneficiary=${forSelf ? "self" : beneficiary}, maxFills=${this.mockCfg.MAX_FILLS})`);
-    await sleep(500);
     this.txCounter++;
-    const txHash = `0xmock${this.txCounter.toString(16).padStart(60, "0")}`;
+    let txHash = `0xmock${this.txCounter.toString(16).padStart(60, "0")}`;
+    if (source === "uniswap") {
+      log.info(`[mock] Uniswap ${alt!.creditOut > q.creditOut ? `returns ${(alt!.creditOut - q.creditOut).toFixed(4)} more CREDIT than the book` : "returns CREDIT while the book does not meet policy"} → buying through Uniswap`);
+      txHash = (await this.route!.swap(usdgIn, alt!.creditOut * 0.99)).hash;
+      log.info(`[mock] credit.activate(${alt!.creditOut.toFixed(4)}${forSelf ? "" : `, beneficiary=${beneficiary}`})`);
+      await sleep(300);
+    } else {
+      log.info(`[mock] approve(USDG → Exchange, ${cost.toFixed(4)})`);
+      await sleep(300);
+      log.info(`[mock] buyAndActivate(usdgIn=${usdgIn}, minCreditOut=${(q.creditOut * 0.99).toFixed(4)}, beneficiary=${forSelf ? "self" : beneficiary}, maxFills=${this.mockCfg.MAX_FILLS})`);
+      await sleep(500);
+    }
     if (forSelf) {
       const before = this.balance;
-      this.balance += q.creditOut; // 1 CREDIT = $1 of activated balance
-      log.info(`[mock] Activated ${q.creditOut.toFixed(4)} CREDIT. API balance $${before.toFixed(4)} → $${this.balance.toFixed(4)}`);
+      this.balance += chosen.creditOut; // 1 CREDIT = $1 of activated balance
+      log.info(`[mock] Activated ${chosen.creditOut.toFixed(4)} CREDIT. API balance $${before.toFixed(4)} → $${this.balance.toFixed(4)}`);
     } else {
-      this.fundHook?.(beneficiary, q.creditOut);
-      log.info(`[mock] Activated ${q.creditOut.toFixed(4)} CREDIT into ${beneficiary}`);
+      this.fundHook?.(beneficiary, chosen.creditOut);
+      log.info(`[mock] Activated ${chosen.creditOut.toFixed(4)} CREDIT into ${beneficiary}`);
     }
     this.budgetGuard.record(cost);
 
     const record: RefuelRecord = {
       usdgSpent: cost,
-      creditOut: q.creditOut,
-      price: q.price,
-      discount: q.discount,
-      fills: q.fills,
+      creditOut: chosen.creditOut,
+      price: chosen.price,
+      discount: chosen.discount,
+      fills: source === "uniswap" ? 0 : q.fills,
+      route: source,
       beneficiary: forSelf ? undefined : beneficiary,
       txHash,
       activationId: String(this.txCounter),
@@ -132,6 +177,80 @@ export class MockCreditManager extends CreditManager {
 
   override async refuelGasCost(): Promise<number> {
     return 0.0005;
+  }
+
+  // ---- sell side ----
+
+  override async book(): Promise<BookState> {
+    await sleep(100);
+    const ours = [...this.orders.values()].filter((o) => o.status === "open");
+    return {
+      bestPrice: MOCK_BOOK.bestPriceRaw / MOCK_BOOK.priceScale,
+      bestPriceRaw: MOCK_BOOK.bestPriceRaw,
+      priceScale: MOCK_BOOK.priceScale,
+      priceTick: MOCK_BOOK.priceTick,
+      minOrder: MOCK_BOOK.minOrder,
+      feeBps: MOCK_BOOK.feeBps,
+      depthCredit: 36_000 + ours.reduce((s, o) => s + o.remaining, 0),
+      depthUsdg: 33_000,
+      openOrders: 11 + ours.length,
+    };
+  }
+
+  /** Mock asks fill completely the second time they are looked at, so a demo shows the whole loop. */
+  override async orderOf(orderId: string | bigint): Promise<OrderState> {
+    const o = this.orders.get(String(orderId));
+    if (!o) return { orderId: String(orderId), seller: "0x0000000000000000000000000000000000000000", price: 0, priceRaw: 0, remaining: 0, filled: 0, status: "unknown" };
+    this.checks++;
+    if (o.status === "open" && this.checks > o.placedAtCheck + 1) {
+      o.filled = o.remaining;
+      o.remaining = 0;
+      o.status = "filled";
+      this.usdg += o.filled * o.price;
+      log.info(`[mock] A buyer took ask ${o.orderId}: +${(o.filled * o.price).toFixed(4)} USDG in the wallet`);
+    }
+    return { ...o };
+  }
+
+  override async sell(credit: number, priceRaw: number): Promise<SellRecord> {
+    await sleep(200);
+    if (credit > this.heldCredit + 1e-9) throw new Error(`[mock] Insufficient CREDIT: holding ${this.heldCredit.toFixed(4)}, listing ${credit}`);
+    if (priceRaw % MOCK_BOOK.priceTick !== 0 || priceRaw <= 0 || priceRaw > MOCK_BOOK.priceScale) throw new Error(`[mock] BadPrice(${priceRaw})`);
+    if (credit < MOCK_BOOK.minOrder) throw new Error(`[mock] order below MIN_ORDER (${credit} < ${MOCK_BOOK.minOrder})`);
+    this.txCounter++;
+    const orderId = String(0x9b_0000_0000 + this.txCounter);
+    this.heldCredit -= credit;
+    this.orders.set(orderId, { orderId, seller: this.wallet.address, price: priceRaw / MOCK_BOOK.priceScale, priceRaw, remaining: credit, filled: 0, status: "open", placedAtCheck: this.checks });
+    log.info(`[mock] approve(CREDIT → Exchange, ${credit.toFixed(4)}) · sell(${credit.toFixed(4)} CREDIT @ ${(priceRaw / MOCK_BOOK.priceScale).toFixed(4)}) → order ${orderId}`);
+    const rec: SellRecord = { orderId, credit, price: priceRaw / MOCK_BOOK.priceScale, priceRaw, txHash: `0xmock${this.txCounter.toString(16).padStart(60, "0")}`, dryRun: false, at: new Date().toISOString() };
+    this.sells.push(rec);
+    return rec;
+  }
+
+  override async cancel(orderId: string | bigint): Promise<`0x${string}`> {
+    const o = this.orders.get(String(orderId));
+    if (!o) throw new Error(`[mock] NoSuchOrder(${orderId})`);
+    if (o.status !== "open") throw new Error(`[mock] order ${orderId} is ${o.status}`);
+    this.heldCredit += o.remaining;
+    o.remaining = 0;
+    o.status = "cancelled";
+    log.info(`[mock] cancel(${orderId}): CREDIT returned to the wallet`);
+    return "0xmockcancel";
+  }
+
+  override async buyHeld(usdgIn: number, minDiscount = this.mockCfg.MIN_DISCOUNT): Promise<RefuelRecord> {
+    const q = await this.quote(usdgIn);
+    if (!CreditManager.acceptable(q, minDiscount)) throw new Error(`[mock] discount ${(q.discount * 100).toFixed(1)}% below policy`);
+    const cost = q.usdgSpent + q.feeAtoms;
+    this.budgetGuard.assertCanSpend(cost);
+    if (cost > this.usdg) throw new Error(`[mock] Insufficient USDG: wallet holds ${this.usdg.toFixed(4)}`);
+    await sleep(300);
+    this.txCounter++;
+    this.usdg -= cost;
+    this.heldCredit += q.creditOut;
+    this.budgetGuard.record(cost);
+    log.info(`[mock] buy(usdgIn=${usdgIn}, recipient=self): now holding ${this.heldCredit.toFixed(4)} unactivated CREDIT`);
+    return { usdgSpent: cost, creditOut: q.creditOut, price: q.price, discount: q.discount, fills: q.fills, txHash: `0xmock${this.txCounter.toString(16).padStart(60, "0")}`, dryRun: false, at: new Date().toISOString() };
   }
 }
 

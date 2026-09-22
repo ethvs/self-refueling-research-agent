@@ -30,7 +30,7 @@ export function renderReport(outcome: ResearchOutcome, credit: CreditManager, me
       : credit.refuels
           .map(
             (r) =>
-              `| ${r.at} | ${r.usdgSpent.toFixed(4)} | ${r.creditOut.toFixed(4)} | ${(r.discount * 100).toFixed(1)}% | ${r.fills} | ${r.dryRun ? "dry-run" : r.txHash ?? "-"} |`,
+              `| ${r.at} | ${r.usdgSpent.toFixed(4)} | ${r.creditOut.toFixed(4)} | ${(r.discount * 100).toFixed(1)}% | ${r.route === "uniswap" ? "Uniswap" : `订单簿 · ${r.fills} 笔`} | ${r.dryRun ? "dry-run" : r.txHash ?? "-"} |`,
           )
           .join("\n");
 
@@ -79,7 +79,7 @@ ${
 
 ### 自动续费记录
 
-| 时间 | USDG 花费 | CREDIT 激活 | 折扣 | 成交笔数 | 交易 |
+| 时间 | USDG 花费 | CREDIT 激活 | 折扣 | 来源 | 交易 |
 |---|---|---|---|---|---|
 ${refuelRows}
 `;

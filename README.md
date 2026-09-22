@@ -16,9 +16,10 @@ Agent 核心循环
   ├── 1. 规划任务（便宜模型输出 JSON 计划，不合法则重试一次）
   ├── 2. 执行子任务（联网检索模型 perplexity/sonar，带真实引用）
   ├── 3. 每 2 步一个检查点：读余额（GET /api/v1/key）→ 记账本次 API 花费并对照上限 → 低于阈值则续费
-  ├── 4. 续费：exchange.getQuote → 折扣达标 → 预算守卫 → 预检 gas / USDG → approve → buyAndActivate → 等余额更新
+  ├── 4. 续费：订单簿 getQuote 与 Uniswap 报价二选一（CREDIT 更多者）→ 折扣达标 → 预算守卫 → 预检 gas / USDG → approve → buyAndActivate（或 swap + activate）→ 等余额更新
   ├── 5. 网关中途报余额耗尽（402）→ 立即续费并重试一次
   └── 6. 强模型汇总，输出报告（含成本表 + 续费记录）；中途失败则保存部分报告 + 日志
+        └── 7. 运行结束（MARKET_MAKER=true）：结算已成交的卖单 → 便宜就补货 → 把多余 CREDIT 挂到订单簿
 ```
 
 三层模型路由：规划 `gpt-4o-mini` → 检索 `perplexity/sonar` → 总结 `claude-sonnet-4.5`。任一模型无提供方时自动回退到备选。
@@ -31,6 +32,8 @@ Agent 核心循环
 | 推理 | `https://api.orbio.so/api/v1`，OpenAI SDK 直连，模型 ID 为 OpenRouter 风格（`GET /models`）；配置的模型无提供方时自动回退到备选模型 |
 | 余额 | `GET /api/v1/key` 的 `balance.available`（美元字符串） |
 | 买入 | `exchange.getQuote(usdgIn, maxFills)` 报价 → `buyAndActivate(usdgIn, minCreditOut, bytes32(recipient), maxFills)`；USDG/CREDIT 均 6 位小数 |
+| 备选买入 | Uniswap v4：Quoter `quoteExactInput` 报价 → Permit2 授权 → Universal Router `execute(V4_SWAP)` → `credit.activate`；与订单簿比价后择优 |
+| 卖出 | `credit.approve(Exchange)` → `exchange.sell(creditAtoms, price)`；`orderOf` / `cancel` / `bestPrice` / `depth` |
 | 激活已持有 CREDIT | `credit.previewActivation` + `credit.activate(amount)` |
 | 折扣计算 | `price = (usdgSpent + feeAtoms) / creditOut`，`discount = 1 - price`，低于 `MIN_DISCOUNT` 不买 |
 | 合约地址 | 默认写死官方部署，见 [src/abi/orbio.ts](src/abi/orbio.ts)，可用 `.env` 覆盖 |
@@ -46,7 +49,9 @@ src/
 ├── store.ts            报告归档（.md + .json + .log）、追问追加、对比保存
 ├── config.ts           .env 校验（zod）、常量、配置自洽检查
 ├── wallet.ts           钱包、签名派生 / 轮换 API Key（只存内存）
-├── credit-manager.ts   余额、报价、buyAndActivate、activate
+├── credit-manager.ts   余额、报价、buyAndActivate、activate；订单簿卖出（sell / cancel / orderOf / book）；订单簿 vs Uniswap 选路
+├── market.ts           做市：卖出多余 CREDIT、低价补货、跟踪挂单
+├── uniswap.ts          Uniswap v4 备选路径：路径解析、Quoter 报价、Permit2 + Universal Router 换币
 ├── budget.ts           单任务 / 每日 USDG 预算守卫（持久化到 .agent-state.json）
 ├── llm.ts              Orbio 网关封装 + token 计量 + 模型回退
 ├── research-agent.ts   规划 → 检索 → 综合；追问；对比；检查点（余额 / API 花费上限）；部分结果
@@ -56,7 +61,7 @@ src/
 ├── report.ts           Markdown 报告渲染（含未完成标注）
 ├── mock.ts             离线演示替身（含 402 模拟）
 ├── retry.ts / logger.ts  重试；分级日志、SSE 监听、按次运行归档
-└── abi/orbio.ts        合约地址 + Exchange / CREDIT ABI
+└── abi/orbio.ts, abi/uniswap.ts   合约地址 + Exchange / CREDIT ABI；Universal Router / Permit2 / v4 Quoter ABI
 public/index.html       Web 界面（单页）
 tests/                  纯逻辑单元测试
 docs/screenshots/       主网验证截图（索引见 SUBMISSION.md）
@@ -83,6 +88,7 @@ cp .env.example .env   # 只需填写 PRIVATE_KEY（RPC 与合约地址已有默
 npm run dev -- models
 npm run dev -- balance
 npm run dev -- quote 5
+npm run dev -- route 5                       # 订单簿 vs Uniswap 报价对比（需配置 UNISWAP_PATH）
 npm run dev -- "Robinhood Chain 上的 AI 推理积分市场现状"
 ```
 
@@ -130,6 +136,74 @@ npm run dev -- team transfer 1 0.5 --live           # credit.transfer 0.5 未激
 - 真实模式下 `DRY_RUN=true` 无法链上拨款，工作 Agent 会共用协调者的 Key 跑通并行流程；`--live` 才会真实给工作 Agent 钱包激活额度。
 - 报告包含团队分工表、各 Agent 子报告、协调者拨款记录（beneficiary + 交易哈希）。Web 界面的模式下拉框可选 2 到 4 个 Agent。
 
+### 卖出多余 CREDIT（做市，「赚积分养自己」）
+
+Agent 平时买到的 CREDIT 会直接激活进 API 余额。钱包里**未激活**的 CREDIT（用 `buy` 买入持有、补货、或别人转来的）是库存，可以挂到 Exchange 订单簿上卖出，成交的 USDG 直接回到钱包，下次续费就用它。
+
+```bash
+npm run dev -- book                     # 最低卖价、深度、最小挂单量、手续费，以及按策略会挂的价格
+npm run dev -- buy 4 --live             # 花 4 USDG 买 CREDIT 到钱包（不激活），走折扣规则和预算守卫
+npm run dev -- sell 5 --live            # 挂单卖 5 CREDIT，价格 = max(当前最低卖价, SELL_MIN_PRICE) 向上取整到刻度
+npm run dev -- sell 5 0.85 --live       # 指定价格（USDG / CREDIT，必须是 0.025 的倍数，≤ 1）
+npm run dev -- orders                   # 我们的挂单：剩余 / 已成交
+npm run dev -- cancel <orderId> --live  # 撤单，未成交的 CREDIT 退回钱包
+npm run dev -- market --live            # 一轮维护：结算已成交 → 便宜就补货 → 挂出多余库存
+```
+
+`MARKET_MAKER=true` 时每次研究运行结束自动做一轮维护。策略参数：
+
+| 参数 | 含义 |
+|---|---|
+| `CREDIT_RESERVE` | 钱包里保留、不挂出的 CREDIT（留给自己激活） |
+| `SELL_MIN_PRICE` | 挂单底价（USDG / CREDIT）。实际挂价 = max(当前最低卖价, 底价)，向上取整到刻度 0.025 |
+| `INVENTORY_USDG` | 订单簿折扣 ≥ `INVENTORY_DISCOUNT` 时，花这么多 USDG 买 CREDIT 持有；0 = 不补货 |
+| `INVENTORY_DISCOUNT` | 补货折扣门槛（0.25 = 含手续费每 CREDIT ≤ 0.75 USDG） |
+
+补货一次只做一批：还有挂单未成交、或钱包里还有没挂出的库存时不再买。补货走 `MAX_SPEND_PER_TASK` / `MAX_SPEND_PER_DAY` 预算。底价低于补货价时启动会警告。**挂单能否成交、多久成交完全取决于其他买家，这里不保证盈利。**
+
+Exchange 卖出侧的接口没有写在公开文档里，是从主网实现合约（代理 `0x6951…ebc0` 后面的 `0x2d253e15…fbb7`）里恢复并用 `eth_call` 逐个验证的：`sell(uint256 creditAtoms, uint32 price)`、`cancel(uint256 orderId)`、`orderOf(orderId)`、`bestPrice()`、`depth()`、`MIN_ORDER()`（主网 5 CREDIT）、`PRICE_SCALE()`（10000，价格 7750 = 0.7750）；价格只接受 250 的倍数且 ≤ 10000；卖单先 `credit.approve` 再托管进 Exchange；事件 `OrderPlaced(orderId, seller, price, seq, creditAtoms)`；错误 `BadPrice(uint32)`、`NotSeller(uint256)`、`NoSuchOrder(uint256)`。买方手续费 200 bps，卖方按挂价足额收 USDG。
+
+离线演示：
+
+```bash
+# 三轮：补货 → 挂单 → 模拟成交回款 → 再补货 → 预算守卫拒绝第三次补货
+$env:MARKET_MAKER='true'; $env:INVENTORY_USDG='5'; $env:INVENTORY_DISCOUNT='0.15'; $env:SELL_MIN_PRICE='0.9'; $env:MAX_SPEND_PER_TASK='10'; $env:MAX_SPEND_PER_DAY='20'; npm run dev -- --mock market --rounds 3
+```
+
+### Uniswap 备选买入路径（订单簿之外的第二个买入渠道）
+
+文档里提到 CREDIT 也可以经 Uniswap 买到（`USDG → NVDA → ORBIO → CREDIT`）。项目把它实现为续费时的**第二报价源**（[src/uniswap.ts](src/uniswap.ts)）：
+
+```
+purchase(usdgIn)
+  ├── 订单簿报价：exchange.getQuote(usdgIn)            → creditOut_A（含 2% 手续费）
+  ├── Uniswap 报价：V4 Quoter.quoteExactInput(path)     → creditOut_B
+  ├── 选路：两者都过 MIN_DISCOUNT 时取 CREDIT 更多的一方；只有一方过就用那一方；都不过则不买
+  ├── 订单簿：approve(USDG → Exchange) → buyAndActivate(...)            （一笔交易买入并激活）
+  └── Uniswap：approve(USDG → Permit2) → Permit2.approve(→ Universal Router)
+              → UniversalRouter.execute(V4_SWAP: SWAP_EXACT_IN ‖ SETTLE_ALL ‖ TAKE_ALL, minOut = 报价 × 99%)
+              → CREDIT 到钱包 → credit.activate(amount[, beneficiary])   （买入 + 激活两步）
+```
+
+两条路走同一套预算守卫、`DRY_RUN`、gas / 余额预检和重试规则；报告的「自动续费记录」表会标明来源（订单簿 / Uniswap）。给工作 Agent 拨款时同样适用：Uniswap 买到的 CREDIT 用 `activate(amount, beneficiary)` 激活到对方账户。
+
+```bash
+npm run dev -- route 2        # 两个渠道各报价 2 USDG，并显示这次续费会走哪条路
+npm run dev -- refuel 2 --live
+```
+
+配置（`.env`）：`UNISWAP_PATH`（JSON 数组，每跳 `token / fee / tickSpacing / hooks`，以 CREDIT 结尾；token 可写 `NVDA`、`ORBIO`、`CREDIT` 或地址）、`UNISWAP_QUOTER`（v4 Quoter 地址）、`UNISWAP_ROUTER`（默认链上的 Universal Router `0x6fF5…9b43`）、`PERMIT2_ADDRESS`（默认规范部署）。`UNISWAP_PATH` 留空即只用订单簿。
+
+链上现状（2026-09-22 查链）：Robinhood Chain 上 Uniswap v4 PoolManager 在 `0x8366a39cc670b4001a1121b8f6a443a643e40951`，Universal Router 在 `0x6fF5693b99212Da76ad316178A184AB56D299b43`，但 CREDIT 还没有与 ORBIO、NVDA 或 USDG 的池子（只有两个带 hook 的 CREDIT/「AI」池和一个手续费 90% 的 ETH 池）。所以 `.env.example` 里 `UNISWAP_PATH` 和 `UNISWAP_QUOTER` 留空；官方池上线后填入 fee / tickSpacing / hooks 和 Quoter 地址即可启用，代码不用改。
+
+离线演示（mock 池价 0.79，比订单簿 0.82 便宜；`MIN_DISCOUNT=0.2` 让订单簿 18% 的折扣不达标）：
+
+```bash
+$env:UNISWAP_PATH='mock'; $env:MIN_DISCOUNT='0.2'; npm run demo
+```
+
+日志会显示两边报价 → 选 Uniswap → approve / Permit2 / `UniversalRouter.execute` → `credit.activate` → 余额恢复，报告的续费表来源列为 Uniswap。
+
 ### 报告归档
 
 每次运行在 `reports/` 生成三个同名文件：`<id>.md`（可读报告）、`<id>.json`（结构化记录：步骤原始结果、成本、追问历史、状态）和 `<id>.log`（本次运行的完整日志，含每次余额检查、报价、链上交易）。追问答案会追加到 `.md` 末尾的「追问」章节；对比结果保存为 `compare_<时间>.md`。
@@ -141,6 +215,7 @@ npm run dev -- team transfer 1 0.5 --live           # credit.transfer 0.5 未激
 | 层 | 控制 | 超限行为 |
 |---|---|---|
 | 链上购买 | `MAX_SPEND_PER_TASK` / `MAX_SPEND_PER_DAY`（USDG，每日额度持久化在 `.agent-state.json`） | 拒绝本次购买；Agent 用剩余余额继续，余额耗尽则出部分报告 |
+| 做市补货 | 同一份预算守卫；一次只补一批 | 拒绝补货，已有库存照常挂出 |
 | 网关消耗 | `MAX_API_SPEND_PER_TASK`（美元，每个 Agent 每次运行） | 停止研究，保存部分报告 |
 | 价格 | 折扣 ≥ `MIN_DISCOUNT` 才买；`minCreditOut` 为报价的 99% 防滑点；只授权本次 `usdgIn` | 折扣不达标则不买 |
 | 团队拨款 | 协调者的预算守卫统一管所有工作 Agent 的拨款，拨款请求串行执行 | 被拒的 Agent 用剩余余额继续 |
@@ -260,6 +335,6 @@ What the module already handles for you: the `401` a fresh key gets before its f
 - [x] Web 界面
 - [x] 多 Agent 协作（协调者向工作 Agent 按需激活额度，工作 Agent 无需 gas）—— 主网已验证
 - [x] 协调者向工作 Agent `credit.transfer` 未激活 CREDIT（`team transfer` 命令，尚未链上实测）
-- [ ] 多余 CREDIT 自动 `sell` 挂单（不在本次范围）
-- [ ] Uniswap Universal Router 路径（USDG → NVDA → ORBIO → CREDIT）作为订单簿之外的备选（不在本次范围）
+- [x] 多余 CREDIT 自动 `sell` 挂单 + 低价补货（`market` 命令；卖出侧接口从主网合约恢复并用 eth_call 验证，完整流程见离线演示）
+- [x] Uniswap Universal Router 路径（USDG → NVDA → ORBIO → CREDIT）作为订单簿之外的备选（`route` 命令；与订单簿比价择优，池子上线后填 `.env` 即启用）
 - [ ] Telegram / Discord Bot（不在本次范围）

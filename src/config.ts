@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { z } from "zod";
 import { ADDRESSES, ROBINHOOD_CHAIN_ID } from "./abi/orbio.js";
+import { UNISWAP } from "./abi/uniswap.js";
 
 const hex = z.string().regex(/^0x[0-9a-fA-F]*$/, "must be 0x-prefixed hex");
 
@@ -46,6 +47,31 @@ const schema = z.object({
   /** USDG the coordinator spends per worker top-up (buyAndActivate with beneficiary = worker). */
   WORKER_FUND_USDG: z.coerce.number().positive().default(0.1),
 
+  // ===== Market maker (sell surplus CREDIT on the order book) =====
+  /** After each research run: list surplus CREDIT for sale and, optionally, restock when the book is cheap. */
+  MARKET_MAKER: z
+    .string()
+    .default("false")
+    .transform((v) => v.toLowerCase() === "true"),
+  /** Unactivated CREDIT to keep in the wallet (for the agent's own activations); only the excess is listed. */
+  CREDIT_RESERVE: z.coerce.number().nonnegative().default(0),
+  /** Floor for asks in USDG per CREDIT. The ask is max(best ask, floor), rounded up to the book's price tick. */
+  SELL_MIN_PRICE: z.coerce.number().min(0.01).max(1).default(0.8),
+  /** USDG to spend buying CREDIT to hold (not activate) when the book discount ≥ INVENTORY_DISCOUNT. 0 = never restock. */
+  INVENTORY_USDG: z.coerce.number().nonnegative().default(0),
+  /** Restock only at this discount or better (0.25 = pay ≤ 0.75 USDG per CREDIT incl. fee). */
+  INVENTORY_DISCOUNT: z.coerce.number().min(0).max(0.99).default(0.25),
+
+  // ===== Uniswap fallback (buy CREDIT through v4 pools when the order book is empty or worse) =====
+  /** Universal Router on Robinhood Chain. */
+  UNISWAP_ROUTER: hex.length(42).default(UNISWAP.UNIVERSAL_ROUTER),
+  /** Permit2 (canonical deployment); the router pulls USDG through it. */
+  PERMIT2_ADDRESS: hex.length(42).default(UNISWAP.PERMIT2),
+  /** v4 Quoter address. Empty = route disabled (no official CREDIT pool exists yet, so there is no default). */
+  UNISWAP_QUOTER: z.union([z.literal(""), hex.length(42)]).default(""),
+  /** JSON array of hops ending at CREDIT, e.g. [{"token":"NVDA","fee":3000,"tickSpacing":60},…]. Empty = route disabled. */
+  UNISWAP_PATH: z.string().default(""),
+
   DRY_RUN: z
     .string()
     .default("true")
@@ -84,6 +110,20 @@ export function configWarnings(cfg: Config): string[] {
     w.push(
       `WORKER_FUND_USDG × WORKER_COUNT (${(cfg.WORKER_FUND_USDG * cfg.WORKER_COUNT).toFixed(2)}) > MAX_SPEND_PER_TASK (${cfg.MAX_SPEND_PER_TASK}): only ${affordable} worker funding(s) per team run will be approved`,
     );
+  }
+  if (cfg.MARKET_MAKER && cfg.INVENTORY_USDG > 0) {
+    const buyPrice = 1 - cfg.INVENTORY_DISCOUNT;
+    if (cfg.SELL_MIN_PRICE <= buyPrice) {
+      w.push(
+        `SELL_MIN_PRICE (${cfg.SELL_MIN_PRICE}) ≤ 1 − INVENTORY_DISCOUNT (${buyPrice.toFixed(2)}): restocked CREDIT could be listed below what it cost`,
+      );
+    }
+    if (cfg.INVENTORY_USDG > cfg.MAX_SPEND_PER_TASK) {
+      w.push(`INVENTORY_USDG (${cfg.INVENTORY_USDG}) > MAX_SPEND_PER_TASK (${cfg.MAX_SPEND_PER_TASK}): restocking will always be refused by the budget guard`);
+    }
+  }
+  if (cfg.UNISWAP_PATH && !cfg.UNISWAP_QUOTER) {
+    w.push("UNISWAP_PATH is set but UNISWAP_QUOTER is empty: the Uniswap route is disabled");
   }
   return w;
 }

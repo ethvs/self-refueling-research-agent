@@ -1,0 +1,26 @@
+[2026-09-22T15:43:41.964Z] INFO  [credit] API balance: $0.5400 (threshold $0.5)
+[2026-09-22T15:43:42.368Z] INFO  [agent] Plan with 4 steps
+[2026-09-22T15:43:42.368Z] INFO  [agent]   1. 梳理「Robinhood Chain 上的 AI 推理积分市场现状」的背景与核心概念
+[2026-09-22T15:43:42.368Z] INFO  [agent]   2. 收集现状数据与代表案例
+[2026-09-22T15:43:42.368Z] INFO  [agent]   3. 分析主要争议、风险与限制
+[2026-09-22T15:43:42.368Z] INFO  [agent]   4. 对比可选方案与趋势判断
+[2026-09-22T15:43:42.368Z] INFO  [agent] Executing step 1/4: 梳理「Robinhood Chain 上的 AI 推理积分市场现状」的背景与核心概念
+[2026-09-22T15:43:42.771Z] INFO  [agent] Executing step 2/4: 收集现状数据与代表案例
+[2026-09-22T15:43:43.177Z] INFO  [agent] API spend this run: $0.0450 / cap $0.5
+[2026-09-22T15:43:43.177Z] INFO  [credit] API balance: $0.4950 (threshold $0.5)
+[2026-09-22T15:43:43.177Z] WARN  [credit] Balance below threshold, refueling…
+[2026-09-22T15:43:43.333Z] INFO  [mock] [mock] Quote: 0.3 USDG → 0.3659 CREDIT via 2 fill(s), price 0.8200 (18.0% off)
+[2026-09-22T15:43:43.489Z] INFO  [credit] Quote (uniswap): 0.3 USDG → 0.3797 CREDIT via USDG → NVDA (fee 3000) → ORBIO (fee 3000) → CREDIT (fee 500) [mock pools], price 0.7900 (21.0% off)
+[2026-09-22T15:43:43.490Z] INFO  [mock] [mock] Uniswap returns 0.0139 more CREDIT than the book → buying through Uniswap
+[2026-09-22T15:43:43.490Z] INFO  [mock] [mock] approve(USDG → Permit2, 0.3) · Permit2.approve(USDG → Universal Router)
+[2026-09-22T15:43:43.800Z] INFO  [mock] [mock] UniversalRouter.execute(V4_SWAP: 0.3 USDG → ≥ 0.3759 CREDIT via USDG → NVDA (fee 3000) → ORBIO (fee 3000) → CREDIT (fee 500) [mock pools])
+[2026-09-22T15:43:44.301Z] INFO  [mock] [mock] credit.activate(0.3797)
+[2026-09-22T15:43:44.616Z] INFO  [mock] [mock] Activated 0.3797 CREDIT. API balance $0.4950 → $0.8747
+[2026-09-22T15:43:44.616Z] INFO  [budget] Recorded spend 0.3000 USDG (task 0.3000, day 0.3000)
+[2026-09-22T15:43:44.616Z] INFO  [agent] Executing step 3/4: 分析主要争议、风险与限制
+[2026-09-22T15:43:45.023Z] INFO  [agent] Executing step 4/4: 对比可选方案与趋势判断
+[2026-09-22T15:43:45.432Z] INFO  [agent] API spend this run: $0.0750 / cap $0.5
+[2026-09-22T15:43:45.432Z] INFO  [credit] API balance: $0.8447 (threshold $0.5)
+[2026-09-22T15:43:45.432Z] INFO  [agent] Synthesizing final report with strong model
+[2026-09-22T15:43:45.842Z] INFO  [service] Report saved to reports\2026-09-22T15-43-45_robinhood-chain-上的-ai-推理积分市场现状.md
+[2026-09-22T15:43:45.842Z] INFO  [service] Summary: 6 calls, $0.5400 → $0.8147, 1 refuel(s), 0.3000 USDG spent

@@ -55,7 +55,9 @@ export class ResearchService {
     try {
       creditBefore = await credit.getBalance();
       const agent = new ResearchAgent(llm, credit, { maxSteps, apiSpendCap: cfg.MAX_API_SPEND_PER_TASK });
-      return await archive(await agent.run(topic));
+      const result = await archive(await agent.run(topic));
+      await this.afterRun();
+      return result;
     } catch (err) {
       // Keep every finished step and the full log so nothing paid for is lost.
       const partial = err instanceof ResearchInterrupted ? err.partial : emptyOutcome(topic, startedAt, err);
@@ -90,6 +92,7 @@ export class ResearchService {
         `Team summary: ${cost.calls} calls, ${team.workers.length} workers, ${credit.refuels.filter((r) => r.beneficiary).length} worker funding(s), ${credit.totalSpent().toFixed(4)} USDG spent`,
       );
       store.saveLog(record.id, capture.lines);
+      await this.afterRun();
       return { record, markdown };
     } catch (err) {
       // Coordinator-level failure (split, funding, balance read): archive the log under an empty report.
@@ -116,6 +119,16 @@ export class ResearchService {
     }
   }
 
+  /** Market-maker maintenance after a successful run; policy refusals are logged, never thrown. */
+  private async afterRun() {
+    if (!this.rt.cfg.MARKET_MAKER) return;
+    try {
+      await this.rt.market.rebalance();
+    } catch (err) {
+      log.warn(`market maker skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   async ask(reportId: string, question: string): Promise<string> {
     const rec = this.rt.store.get(reportId);
     if (!rec) throw new Error(`report not found: ${reportId}`);
@@ -137,8 +150,13 @@ export class ResearchService {
   }
 
   async status() {
-    const { credit, wallet, mode, cfg, budget } = this.rt;
-    const [info, onchain] = await Promise.all([credit.getKeyInfo(), credit.walletBalances().catch(() => null)]);
+    const { credit, wallet, mode, cfg, budget, market } = this.rt;
+    const [info, onchain, book, open] = await Promise.all([
+      credit.getKeyInfo(),
+      credit.walletBalances().catch(() => null),
+      cfg.MARKET_MAKER ? credit.book().catch(() => null) : Promise.resolve(null),
+      cfg.MARKET_MAKER ? market.openOrders().catch(() => []) : Promise.resolve([]),
+    ]);
     return {
       mode,
       address: wallet.address,
@@ -159,6 +177,16 @@ export class ResearchService {
         dayCap: cfg.MAX_SPEND_PER_DAY,
         apiCapPerTask: cfg.MAX_API_SPEND_PER_TASK,
       },
+      market: {
+        enabled: cfg.MARKET_MAKER,
+        reserve: cfg.CREDIT_RESERVE,
+        sellMinPrice: cfg.SELL_MIN_PRICE,
+        inventoryUsdg: cfg.INVENTORY_USDG,
+        bestAsk: book?.bestPrice ?? null,
+        openAsks: open.map((o) => ({ orderId: o.orderId, remaining: o.remaining, filled: o.filled, price: o.price })),
+        sells: credit.sells,
+      },
+      route: credit.route ? { name: credit.route.name, path: credit.route.describe() } : null,
       busy: this.busy,
     };
   }

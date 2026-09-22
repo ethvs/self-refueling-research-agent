@@ -29,12 +29,21 @@ Research:
   orbio-research web [--port 3000]                    start the web UI
 
 Credits:
-  orbio-research balance            API balance + wallet USDG/CREDIT/gas
+  orbio-research balance            API balance + wallet USDG/CREDIT/gas + open asks
   orbio-research quote [usdg]       quote the order book without buying
-  orbio-research refuel [usdg]      buyAndActivate now (respects DRY_RUN)
+  orbio-research route [usdg]       quote the order book AND the Uniswap route; show which one a refuel would use
+  orbio-research refuel [usdg]      buy + activate now via the better venue (respects DRY_RUN)
   orbio-research activate <credit>  activate CREDIT already held in the wallet
   orbio-research models             list model ids from the gateway
   orbio-research rotate-key         derive key for epoch+1
+
+Market (sell surplus CREDIT on the order book):
+  orbio-research book                       best ask, depth, minimum order, fee
+  orbio-research buy <usdg>                 buy CREDIT into the wallet without activating (inventory)
+  orbio-research sell <credit> [price]      place an ask (price in USDG per CREDIT; default = policy price)
+  orbio-research orders                     our open asks (remaining / filled)
+  orbio-research cancel <orderId>           cancel one of our asks
+  orbio-research market [--rounds N]        one maintenance round: settle fills → restock if cheap → list surplus
 
 Options:
   --steps N     max research steps (default 8; per worker in team mode, default 2)
@@ -61,9 +70,9 @@ async function main() {
     dryRun: args.includes("--dry-run"),
   });
   const svc = new ResearchService(rt);
-  const { cfg, credit, llm, wallet, store } = rt;
+  const { cfg, credit, llm, wallet, store, market } = rt;
 
-  const valued = new Set(["--steps", "--port", "--workers"]);
+  const valued = new Set(["--steps", "--port", "--workers", "--rounds"]);
   const positional = args.filter((a, i) => !a.startsWith("--") && !valued.has(args[i - 1] ?? ""));
   const command = positional[0];
 
@@ -121,10 +130,84 @@ async function main() {
       console.log(
         `Budget      : today ${rt.budget.spentToday.toFixed(4)} / ${cfg.MAX_SPEND_PER_DAY} USDG on-chain · per task ≤ ${cfg.MAX_SPEND_PER_TASK} USDG on-chain, ≤ $${cfg.MAX_API_SPEND_PER_TASK} API`,
       );
+      if (market.trackedIds.length) {
+        const open = await market.openOrders().catch(() => []);
+        console.log(`Open asks   : ${open.length}${open.length ? " — " + open.map((o) => `${o.remaining.toFixed(4)} CREDIT @ ${o.price.toFixed(4)}`).join(", ") : ""}`);
+      }
+      return;
+    }
+    case "book": {
+      const b = await credit.book();
+      console.log(`Best ask    : ${b.bestPrice ? `${b.bestPrice.toFixed(4)} USDG/CREDIT (${((1 - b.bestPrice) * 100).toFixed(1)}% off)` : "none (empty book)"}`);
+      console.log(`Depth       : ${b.depthCredit.toFixed(2)} CREDIT ≈ ${b.depthUsdg.toFixed(2)} USDG in ${b.openOrders} order(s)`);
+      console.log(`Min order   : ${b.minOrder} CREDIT · price tick ${(b.priceTick / b.priceScale).toFixed(4)} · buyer fee ${b.feeBps} bps`);
+      console.log(`Policy ask  : ${(CreditManager.choosePrice(b.bestPriceRaw, cfg.SELL_MIN_PRICE, b.priceScale, b.priceTick) / b.priceScale).toFixed(4)} USDG/CREDIT (floor ${cfg.SELL_MIN_PRICE})`);
+      return;
+    }
+    case "buy": {
+      if (!positional[1]) throw new Error("usage: buy <usdg>");
+      console.log(JSON.stringify(await credit.buyHeld(Number(positional[1])), null, 2));
+      return;
+    }
+    case "sell": {
+      if (!positional[1]) throw new Error("usage: sell <credit> [price]");
+      const b = await credit.book();
+      const priceRaw = positional[2] ? Math.round(Number(positional[2]) * b.priceScale) : CreditManager.choosePrice(b.bestPriceRaw, cfg.SELL_MIN_PRICE, b.priceScale, b.priceTick);
+      if (priceRaw % b.priceTick !== 0 || priceRaw <= 0 || priceRaw > b.priceScale) {
+        throw new Error(`price must be a multiple of ${(b.priceTick / b.priceScale).toFixed(4)} and at most 1.0000 (got ${(priceRaw / b.priceScale).toFixed(4)})`);
+      }
+      const rec = await credit.sell(Number(positional[1]), priceRaw);
+      market.track(rec);
+      console.log(JSON.stringify(rec, null, 2));
+      return;
+    }
+    case "orders": {
+      const open = await market.openOrders();
+      if (!open.length) return console.log("(no open asks)");
+      for (const o of open) console.log(`${o.orderId}  ${o.remaining.toFixed(4)} CREDIT left @ ${o.price.toFixed(4)} USDG/CREDIT  (filled ${o.filled.toFixed(4)})`);
+      return;
+    }
+    case "cancel": {
+      if (!positional[1]) throw new Error("usage: cancel <orderId>");
+      console.log(`tx: ${await credit.cancel(positional[1])}`);
+      await market.openOrders().catch(() => []);
+      return;
+    }
+    case "market": {
+      const rounds = Number(flag(args, "--rounds") ?? 1);
+      for (let i = 1; i <= rounds; i++) {
+        if (rounds > 1) log.info(`Market round ${i}/${rounds}`);
+        const r = await market.rebalance();
+        const parts = [
+          r.bought ? `bought ${r.bought.creditOut.toFixed(4)} CREDIT for ${r.bought.usdgSpent.toFixed(4)} USDG` : undefined,
+          r.sold ? `listed ${r.sold.credit.toFixed(4)} CREDIT @ ${r.sold.price.toFixed(4)}${r.sold.orderId ? ` (order ${r.sold.orderId})` : ""}` : undefined,
+          `${r.open.length} ask(s) open`,
+          ...r.notes,
+        ].filter(Boolean);
+        console.log(parts.join(" · "));
+      }
       return;
     }
     case "quote": {
       console.log(JSON.stringify(await credit.quote(positional[1] ? Number(positional[1]) : cfg.REFUEL_USDG), null, 2));
+      return;
+    }
+    case "route": {
+      const usdg = positional[1] ? Number(positional[1]) : cfg.REFUEL_USDG;
+      const q = await credit.quote(usdg);
+      console.log(`Order book : ${usdg} USDG → ${q.creditOut.toFixed(4)} CREDIT via ${q.fills} fill(s), price ${q.price.toFixed(4)} (${(q.discount * 100).toFixed(1)}% off)`);
+      if (!credit.route) {
+        console.log("Uniswap    : not configured (set UNISWAP_PATH and UNISWAP_QUOTER in .env)");
+      } else {
+        const alt = await credit.routeQuote(usdg);
+        console.log(
+          alt
+            ? `Uniswap    : ${usdg} USDG → ${alt.creditOut.toFixed(4)} CREDIT via ${credit.route.describe()}, price ${alt.price.toFixed(4)} (${(alt.discount * 100).toFixed(1)}% off)${alt.gasEstimate ? `, ~${alt.gasEstimate} gas` : ""}`
+            : `Uniswap    : ${credit.route.describe()} — quote failed (see log)`,
+        );
+        const pick = CreditManager.pickSource(q, alt, cfg.MIN_DISCOUNT);
+        console.log(`Refuel via : ${pick ?? `neither (both below MIN_DISCOUNT ${cfg.MIN_DISCOUNT})`}`);
+      }
       return;
     }
     case "refuel": {
